@@ -1,0 +1,303 @@
+﻿Program.Sub.Preflight.Start
+V.Global.bConOpen.Declare
+V.Global.sBasePath.Declare
+V.Global.sProcessedPath.Declare
+V.Global.sErrorsPath.Declare
+Program.External.Include.Library("JB0455.lib")
+Program.Sub.Preflight.End
+
+Program.Sub.Main.Start
+'Written: Brandon Medina
+'Customer: Rapid Line Inc
+'Project: 6816 - Paint Line Labor Uploader
+'Quote: 11919-0
+'Desc: Project will be running off OLU and checks Custom Table for any new records. This table can be written to by RapidLine from their program
+'As records are successfully processed, they get deleted from this table, any errors are noted and skipped over in next iteration. 
+'Project will upload clock in and clock out sequences from their program to Global Shop 
+'Date: 6/28/2022
+	'F.Intrinsic.Control.CallSub(setDirectoryPaths)
+	'Check For Table 
+	F.Intrinsic.Control.CallSub(checkTable)
+	F.Intrinsic.Control.CallSub(processRecords)
+
+
+Program.Sub.Main.End
+
+Program.Sub.setDirectoryPaths.Start
+F.Intrinsic.Control.Try
+	V.Local.sRet.Declare
+	V.Local.bOneRecord.Declare
+	
+	'Source path will be the network folder, as specified by the maintanence program. 
+	F.ODBC.Connection!con.OpenCompanyConnection 
+	V.Global.bConOpen.Set(True)
+	F.ODBC.Connection!con.ExecuteAndReturn("select * from GCG_6816_LABOR_MAINT", V.Local.sRet)
+	F.Intrinsic.String.IsInString(V.Local.sRet, "#$#", True, V.Local.bOneRecord)
+	F.Intrinsic.Control.If(V.Local.bOneRecord)
+		F.Intrinsic.UI.Msgbox("Custom table GCG_6816_LABOR_MAINT contains more than one record. Please address this and try again.")
+		F.Intrinsic.Control.End
+	F.Intrinsic.Control.EndIf
+	
+	F.Intrinsic.Control.If(V.Local.sRet, <>, "")
+		V.Global.sBasePath.Set(V.Local.sRet.Trim)
+		F.ODBC.Connection!con.Close
+		V.Global.bConOpen.Set(False)
+		
+		F.Intrinsic.String.Build("{0}PROCESSED\", V.Global.sBasePath, V.Global.sProcessedPath)
+		F.Intrinsic.String.Build("{0}ERRORS\", V.Global.sBasePath, V.Global.sErrorsPath)
+	F.Intrinsic.Control.Else
+		F.Intrinsic.UI.Msgbox("Custom table GCG_6816_LABOR_MAINT contains no records. Please address this and try again.")
+		F.Intrinsic.Control.End
+	F.Intrinsic.Control.EndIf
+	
+
+F.Intrinsic.Control.Catch
+	F.Intrinsic.Control.CallSub(ErrorMsg, CurrentSub, V.Ambient.CurrentSubroutine)
+F.Intrinsic.Control.EndTry
+Program.Sub.setDirectoryPaths.End
+
+Program.Sub.ErrorMsg.Start
+'Generic Error message.
+V.Local.sError.Declare
+
+'F.Intrinsic.Control.If(V.Global.bConOpen)
+'	F.ODBC.Connection!con.Close
+'F.Intrinsic.Control.EndIf
+
+f.Intrinsic.String.Build("Project GCG_6816_Labor_Upload.g2u {0}{0}Subroutine: {1}{0}Error: {2} with Description: {3}", v.Ambient.NewLine, v.Args.CurrentSub, v.Ambient.ErrorNumber, v.Ambient.ErrorDescription, v.Local.sError)
+f.Intrinsic.UI.Msgbox(v.Local.sError)
+Program.Sub.ErrorMsg.End
+
+Program.Sub.checkTable.Start
+F.Intrinsic.Control.Try
+	V.Local.bExists.Declare
+	V.Local.sSQL.Declare
+	V.Local.sRet.Declare
+	
+	F.ODBC.Connection!con.OpenCompanyConnection
+	V.Global.bConOpen.Set(True)
+	F.ODBC.Connection!con.TableExists("GCG_6816_LABOR_EXP", V.Local.bExists)
+	F.ODBC.Connection!con.Close
+	V.Global.bConOpen.Set(False)
+	F.Intrinsic.Control.If(V.Local.bExists.Not)
+		F.Intrinsic.UI.Msgbox("Table GCG_6816_LABOR_EXP does not exist. Please Redownload project from ARC")
+		F.Intrinsic.Control.End
+	F.Intrinsic.Control.EndIf
+
+F.Intrinsic.Control.Catch
+	F.Intrinsic.Control.CallSub(ErrorMsg, CurrentSub, V.Ambient.CurrentSubroutine)
+F.Intrinsic.Control.EndTry
+Program.Sub.checkTable.End
+
+Program.Sub.processRecords.Start
+F.Intrinsic.Control.Try
+	V.Local.sSQL.Declare
+	V.Local.iRowIndex.Declare
+	V.Local.sEmployeeNum.Declare
+	V.Local.sJob.Declare
+	V.Local.sSuffix.Declare
+	V.Local.sStart.Declare
+	V.Local.sStartDate.Declare
+	V.Local.sStartTime.Declare
+	V.Local.sEnd.Declare
+	V.Local.sEndDate.Declare
+	V.Local.sEndTime.Declare
+	V.Local.sFilter.Declare
+	V.Local.bValidEmp.Declare
+	V.Local.bValidRec.Declare
+	V.Local.sHrs.Declare
+	V.Local.sQty.Declare
+	V.Local.sScrap.Declare
+	V.Local.sSeq.Declare
+	V.Local.sJBEndDate.Declare
+	V.Local.sWC.Declare
+
+	
+	F.ODBC.Connection!con.OpenCompanyConnection
+	V.Global.bConOpen.Set(True)
+	F.Data.DataTable.CreateFromSQL("dtRecords", "con", "select * from GCG_6816_LABOR_EXP where ERR_CODE <> 1", True)
+	'F.Data.Datatable.AddColumn("dtRecords", "ERR_CODE", "Boolean", True)
+	
+	'Create blank tables for Records with Errors, Valid Clock ins, Valid Clock outs. Base it on JOBS_IN_PROCESS_G
+	F.Data.DataTable.CreateFromSQL("dtTemplate", "con", "select * from JOBS_IN_PROCESS_G", True)
+	
+	F.Data.DataTable.Clone("dtTemplate", "dtClockIns", True)
+	'Clockouts table and JB0455 table will contain same info, but formatted according to their end result. Former used for deleting from JOBS_IN_PROCESS_G, latter used for job detail upload
+	'JB0455 table for use w/ Lib file: job detail upload  
+	F.Data.DataTable.Clone("dtTemplate", "dtClockOuts", True)
+	F.Data.DataTable.AddColumn("dtClockOuts", "QTY", "String")
+	
+	
+	F.Data.DataTable.Close("dtTemplate")
+	
+	F.Intrinsic.Control.If(V.DataTable.dtRecords.RowCount, =, 0)
+		F.Intrinsic.Control.End
+	F.Intrinsic.Control.EndIf
+	
+	'Create dt of employees currently clocked in 
+	F.Data.DataTable.CreateFromSQL("dtClockedIn", "con", "select EMPLOYEE, NAME, DATE_IN, TIME_IN, DATE_OUT, TIME_OUT from TIME_ATTENDANCE where DATE_OUT = '00000000' and TIME_OUT = '000000'", True)
+
+	'Loop through records with no Errors present. First check if record has an employee w an open time and attendance record (TIME_ATTENDANCE)
+	'If the record does not contain an end time, then this implies it's a new record, and should write to JOBS_IN_PROCESS_G table to simulate clocking in w/ SFDC 
+	'If record does have end time, this is a clock out sequence, and should build up a row in datatable used in JB0455 lib file, which writes a Job Detail record. Remove existing record in JOB_IN_PROCESS_G as well as custom table
+		
+
+	F.Intrinsic.Control.For(V.Local.iRowIndex, 0, V.DataTable.dtRecords.RowCount--, 1)
+		V.Local.bValidEmp.Set(True)
+		V.Local.bValidRec.Set(True)
+		
+		'Check employee is clocked in
+		F.Intrinsic.String.Build("EMPLOYEE = '{0}'", V.DataTable.dtRecords(V.Local.iRowIndex).EMPLOYEE!FieldValTrim, V.Local.sFilter)
+		
+		F.Intrinsic.Control.If(V.DataView.dtClockedIn!dvValidEmp.Exists)
+			F.Data.DataView.Close("dtClockedIn", "dvValidEmp")
+		F.Intrinsic.Control.EndIf
+		
+		F.Data.DataView.Create("dtClockedIn", "dvValidEmp", 22, V.Local.sFilter, "")
+		F.Intrinsic.Control.If(V.DataView.dtClockedIn!dvValidEmp.RowCount, =, 0)
+			V.Local.bValidEmp.Set(False)
+			F.Data.DataView.Close("dtClockedIn", "dvValidEmp")
+		F.Intrinsic.Control.EndIf
+		
+		'Set Employee
+		V.Local.sEmployeeNum.Set(V.DataTable.dtRecords(V.Local.iRowIndex).EMPLOYEE!FieldValTrim)
+		
+		'Grab Job & Suffix (If it exists)
+		V.Local.sJob.Set(V.DataTable.dtRecords(V.Local.iRowIndex).JOB!FieldValTrim)
+		F.Intrinsic.Control.If(V.Local.sJob.Length, =, 9)
+			V.Local.sJob.Set(V.Local.sJob.Left6)
+			V.Local.sSuffix.Set(V.DataTable.dtRecords(V.Local.iRowIndex).JOB!FieldValTrim.Right3)
+		F.Intrinsic.Control.Else
+			V.Local.sSuffix.Set("")
+		F.Intrinsic.Control.EndIf
+		
+		'Grab Start Time & Format it 
+		V.Local.sStart.Redim(0,0)
+		V.Local.sStart.Set(V.DataTable.dtRecords(V.Local.iRowIndex).START_TIME!FieldValTrim)
+		F.Intrinsic.String.Split(V.Local.sStart, " ", V.Local.sStart)
+		V.Local.sStartDate.Set(V.Local.sStart(0))
+		V.Local.sStartTime.Set(V.Local.sStart(1))
+		
+		'Begins in format YYYY-MM-DD HH:MM:SS.sss. Lib file needs MMDDYY & HHMM. JOBS_IN_PROCESS_G needs YYYYMMDD & HhMMSSss... 
+		F.Intrinsic.String.Format(V.Local.sStartDate, "YYYYMMDD", V.Local.sStartDate)
+		F.Intrinsic.String.Format(V.Local.sStartTime.Left5, "HhMM", V.Local.sStartTime)
+		
+		'Grab Hrs (don't set, otherwise overrides calculation of end - start time)
+		'F.Intrinsic.String.Format(V.DataTable.dtRecords(V.Local.iRowIndex).HRS!FieldValTrim, "#.0000", V.Local.sHrs)
+		'Grab Qty 
+		F.Intrinsic.String.Format(V.DataTable.dtRecords(V.Local.iRowIndex).QTY!FieldValTrim, "0.00", V.Local.sQty)
+		'Grab Scrap Qty
+		F.Intrinsic.String.Format(V.DataTable.dtRecords(V.Local.iRowIndex).SCRAP_QTY!FieldValTrim, "0.00", V.Local.sScrap)
+		'Grab Job Seq aka JOB_OP? 
+		F.Intrinsic.String.LPad(V.DataTable.dtRecords(V.Local.iRowIndex).JOB_OP!FieldValTrim, "0", 6, V.Local.sSeq)
+		
+		'Grab End Time
+		'Create JOBS_IN_PROCESS_G record if clock in (add row to dtClockIns for savetodb), otherwise check for valid record for clock out
+		V.Local.sEnd.Redim(0,0)
+		V.Local.sEnd.Set(V.DataTable.dtRecords(V.Local.iRowIndex).END_TIME!FieldValTrim)
+		
+		F.Intrinsic.Control.If(V.Local.sEnd, <>, "")
+			'Add Clock out sequence to corresponding table
+			F.Intrinsic.String.Split(V.Local.sEnd, " ", V.Local.sEnd)
+			V.Local.sEndDate.Set(V.Local.sEnd(0))
+			V.Local.sEndTime.Set(V.Local.sEnd(1))
+			
+			'Begins in format YYYY-MM-DD HH:MM:SS.sss. Lib file needs MMDDYY & HHMM. JOBS_IN_PROCESS_G needs YYYYMMDD & HhMMSSss... 
+			F.Intrinsic.String.Format(V.Local.sEndDate, "MMDDYY", V.Local.sJBEndDate)
+			F.Intrinsic.String.Format(V.Local.sEndDate, "YYYYMMDD", V.Local.sEndDate)
+			F.Intrinsic.String.Format(V.Local.sEndTime.Left5, "HhMM", V.Local.sEndTime)
+			
+			F.Data.DataTable.AddRow("dtClockOuts", "JOB", V.Local.sJob, "SUFFIX", V.Local.sSuffix, "SEQ", V.Local.sSeq, "EMPLOYEE", V.Local.sEmployeeNum, "START_DATE", V.Local.sStartDate, "START_TIME", V.Local.sStartTime, "QTY", V.Local.sQty)
+	
+			F.Data.DataTable.AddRow("JB0455", "Date", V.Local.sJBEndDate, "Employee", V.Local.sEmployeeNum, "Job", V.Local.sJob, "Suffix", V.Local.sSuffix, "Seq", V.Local.sSeq, "WC", "SAW", "Hours", "", "Closed", "N", "Indirect", "D",  "StartTime", V.Local.sStartTime, "StopTime", V.Local.sEndTime, "RateType", "R", "GoodPcs", V.Local.sQty, "ScrapPcs", V.Local.sScrap, "Reason", "0")
+		F.Intrinsic.Control.Else
+			'Only mark job as in process if the employee is clocked in
+			F.Intrinsic.Control.If(V.Local.bValidEmp)
+				'Add Clock in sequence to corresponding table 
+				F.Intrinsic.String.RPad(V.Local.sStartTime, "0", 8, V.Local.sStartTime)
+				F.Data.DataTable.AddRow("dtClockIns", "JOB", V.Local.sJob, "SUFFIX", V.Local.sSuffix, "SEQ", V.Local.sSeq, "EMPLOYEE", V.Local.sEmployeeNum, "START_DATE", V.Local.sStartDate, "START_TIME", V.Local.sStartTime)
+			F.Intrinsic.Control.EndIf
+		F.Intrinsic.Control.EndIf
+		
+	F.Intrinsic.Control.Next(V.Local.iRowIndex)
+		
+	'Commit both clock in and clock out tables to db tables. Clock in > JOBS_IN_PROCESS_G, Clock out > Delete from JOBS_IN_PROCESS_G; write to JOB_DETAIL via Lib  
+	
+	'Add column combining JOB + SUFFIX for use in deleting from db
+	F.Data.DataTable.AddExpressionColumn("dtClockIns", "JOBSUFF", "String", "trim(JOB) + trim(SUFFIX)")
+	
+	F.Intrinsic.Control.If(V.DataTable.dtClockIns.RowCount, <>, 0)
+		F.Data.DataTable.SaveToDB("dtClockIns", "con", "JOBS_IN_PROCESS_G", "JOB*!*SUFFIX*!*SEQ", 256, "JOB@!@JOB*!*SUFFIX@!@SUFFIX*!*SEQ@!@SEQ*!*EMPLOYEE@!@EMPLOYEE*!*START_DATE@!@START_DATE*!*START_TIME@!@START_TIME")
+		'single sql queries 
+		F.Intrinsic.Control.For(V.Local.iRowIndex, 0, V.DataTable.dtClockIns.RowCount--, 1)
+			F.Intrinsic.String.Build("delete from GCG_6816_LABOR_EXP where EMPLOYEE = '{0}' and JOB = '{1}' and JOB_OP = '{2}'", V.DataTable.dtClockIns(V.Local.iRowIndex).EMPLOYEE!FieldValTrim, V.DataTable.dtClockIns(V.Local.iRowIndex).JOBSUFF!FieldValTrim, V.DataTable.dtClockIns(V.Local.iRowIndex).SEQ!FieldValTrim, V.Local.sSQL)
+			F.ODBC.Connection!con.Execute(V.Local.sSQL)
+		F.Intrinsic.Control.Next(V.Local.iRowIndex)
+	F.Intrinsic.Control.EndIf
+
+	F.Intrinsic.Control.If(V.DataTable.dtClockOuts.RowCount, <>, 0)
+		'Run JB0455 to send labor to JOBS_IN_PROCESS which w/ OLU will post to JOB_DETAIL 
+		F.Intrinsic.Control.CallSub(JB0455Sync)
+		'The callwrapper that this lib file uses has no error handling (if something is off, will just not do anything). Check that table's file was updated recently
+		F.Intrinsic.Control.CallSub(CheckFile, CurrentTime, V.Ambient.Now)
+		'Use Single Sql queries, mode 4 isn't working here. Also lib deletes all entries in JB table. Use dtClockOut table instead 
+		F.Intrinsic.Control.For(V.Local.iRowIndex, 0, V.DataTable.dtClockOuts.RowCount--, 1)
+			F.Intrinsic.String.Build("delete from JOBS_IN_PROCESS_G where EMPLOYEE = '{0}' and JOB = '{1}' and SUFFIX = '{2}' and SEQ = '{3}'", V.DataTable.dtClockOuts(V.Local.iRowIndex).EMPLOYEE!FieldValTrim, V.DataTable.dtClockOuts(V.Local.iRowIndex).JOB!FieldValTrim, V.DataTable.dtClockOuts(V.Local.iRowIndex).SUFFIX!FieldValTrim, V.DataTable.dtClockOuts(V.Local.iRowIndex).SEQ!FieldValTrim, V.Local.sSQL)
+			F.ODBC.Connection!con.Execute(V.Local.sSQL)
+			
+			F.Intrinsic.String.Build("delete from GCG_6816_LABOR_EXP where EMPLOYEE = '{0}' and JOB = '{1}{2}' and JOB_OP = '{3}'", V.DataTable.dtClockOuts(V.Local.iRowIndex).EMPLOYEE!FieldValTrim, V.DataTable.dtClockOuts(V.Local.iRowIndex).JOB!FieldValTrim, V.DataTable.dtClockOuts(V.Local.iRowIndex).SUFFIX!FieldValTrim, V.DataTable.dtClockOuts(V.Local.iRowIndex).SEQ!FieldValTrim, V.Local.sSQL)
+			F.ODBC.Connection!con.Execute(V.Local.sSQL)
+		F.Intrinsic.Control.Next(V.Local.iRowIndex)
+	F.Intrinsic.Control.EndIf
+	
+	F.ODBC.Connection!con.Close
+
+F.Intrinsic.Control.Catch
+	F.Intrinsic.Control.CallSub(ErrorMsg, CurrentSub, V.Ambient.CurrentSubroutine)
+	'If table exists, set custom table sequences to error
+	F.Intrinsic.Control.CallSub(SetError)
+F.Intrinsic.Control.EndTry
+Program.Sub.processRecords.End
+
+Program.Sub.SetError.Start
+F.Intrinsic.Control.Try
+	V.Local.sJob.Declare
+	V.Local.iRowIndex.Declare
+	V.Local.sSuffix.Declare
+	
+	F.Intrinsic.Control.If(V.DataTable.dtRecords.Exists)
+		F.Data.DataTable.SetValue("dtRecords", -1, "ERR_CODE", True)
+		F.Data.DataTable.SaveToDB("dtRecords", "con", "GCG_6816_LABOR_EXP", "JOB*!*EMPLOYEE*!*JOB_OP", 256, "EMPLOYEE@!@EMPLOYEE*!*JOB@!@JOB*!*JOB_OP@!@JOB_OP*!*ERR_CODE@!@ERR_CODE")
+	F.Intrinsic.Control.EndIf
+F.Intrinsic.Control.Catch
+	F.Intrinsic.Control.CallSub(ErrorMsg, CurrentSub, V.Ambient.CurrentSubroutine)
+F.Intrinsic.Control.EndTry
+Program.Sub.SetError.End
+
+Program.Sub.CheckFile.Start
+F.Intrinsic.Control.Try
+	V.Local.sFileName.Declare
+	V.Local.sTimeMod.Declare
+	V.Local.sTimeDiff.Declare
+	
+	F.Intrinsic.String.Build("{0}\MOPEN{1}", V.Caller.FilesDir, V.Caller.CompanyCode, V.Local.sFileName)
+	F.Intrinsic.File.GetFileDateTimeExtended(V.Local.sFileName, 3, True, V.Local.sTimeMod)
+	F.Intrinsic.Date.DateDiff("N", V.Local.sTimeMod, V.Args.CurrentTime, V.Local.sTimeDiff)
+	F.Intrinsic.Math.Abs(V.Local.sTimeDiff, V.Local.sTimeDiff)
+	'Means the file has not been updated in over 1 minute, likely meaning that no work was done to the correct table 
+	F.Intrinsic.Control.If(V.Local.sTimeDiff, >, 1)
+		F.Data.DataTable.AddExpressionColumn("dtClockOuts", "JOBSUFF", "String", "[JOB] + [SUFFIX]")
+		F.Data.DataTable.AddColumn("dtClockOuts", "ERR_CODE", "Boolean")
+		F.Data.DataTable.SetValue("dtClockOuts", -1, "ERR_CODE", True)
+		F.Data.DataTable.SaveToDB("dtClockOuts", "con", "GCG_6816_LABOR_EXP", "JOBSUFF*!*EMPLOYEE*!*SEQ", 256, "JOBSUFF@!@JOB*!*SEQ@!@JOB_OP*!*EMPLOYEE@!@EMPLOYEE*!*ERR_CODE@!@ERR_CODE")
+	F.Intrinsic.Control.EndIf
+	
+F.Intrinsic.Control.Catch
+	F.Intrinsic.Control.CallSub(ErrorMsg, CurrentSub, V.Ambient.CurrentSubroutine)
+F.Intrinsic.Control.EndTry
+Program.Sub.CheckFile.End
+
+Program.Sub.Comments.Start
+${$5$}$20.1.8286.22461$}$1
+${$6$}$bmedina$}$20230104152227291$}$kOipCrsyLBVj2KoSwkcdK23ChxGVcBlE197TarmUdXfJjJcsCctyWSyNm9LO0IYJ4/bc2TPPSdQ=
+Program.Sub.Comments.End
